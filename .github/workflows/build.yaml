@@ -55,6 +55,12 @@ jobs:
         with:
           name: dvfa.aab
           path: build/app/outputs/bundle/release/app-release.aab
+      - name: Check Appknox access token
+        run: |
+          if [ -z "${APPKNOX_ACCESS_TOKEN}" ]; then
+            echo "::error::APPKNOX_ACCESS_TOKEN is empty. Add it under Settings > Secrets and variables > Actions > Repository secrets."
+            exit 1
+          fi
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -74,7 +80,18 @@ jobs:
         id: appknox_scan
         continue-on-error: true
         run: |
-          FILE_ID=$(./bin/appknox upload build/app/outputs/bundle/release/app-release.aab --knoxiq)
+          # The CLI prints some errors to stdout, so show the captured output on failure.
+          if ! OUTPUT=$(./bin/appknox upload build/app/outputs/bundle/release/app-release.aab --knoxiq); then
+            echo "$OUTPUT"
+            echo "::error::appknox upload failed"
+            exit 1
+          fi
+          FILE_ID=$(printf '%s' "$OUTPUT" | tail -n 1 | tr -d '[:space:]')
+          if ! [[ "$FILE_ID" =~ ^[0-9]+$ ]]; then
+            echo "$OUTPUT"
+            echo "::error::appknox upload did not return a numeric file ID"
+            exit 1
+          fi
           echo "Uploaded file id: $FILE_ID"
           echo "file_id=$FILE_ID" >> "$GITHUB_OUTPUT"
           ./bin/appknox cicheck "$FILE_ID" --risk-threshold "${RISK_THRESHOLD}"
@@ -86,7 +103,7 @@ jobs:
           set -euo pipefail
           APPKNOX=./bin/appknox
           FILE_ID="${{ steps.appknox_scan.outputs.file_id }}"
-          $APPKNOX knoxfixer --file-id "$FILE_ID"
+          $APPKNOX autofix --file-id "$FILE_ID"
       - name: Fail if cicheck found issues
         if: steps.appknox_scan.outcome == 'failure'
         run: exit 1
