@@ -19,7 +19,14 @@ env:
   RISK_THRESHOLD: CRITICAL
   APPKNOX_ACCESS_TOKEN: 12113443ec9b5c141adc459f9afec11830d709d4
   APPKNOX_API_HOST: https://autofix.staging.appknox.io/
-  APP_PATH: build/dvfa.ipa
+  # fastlane needs a UTF-8 locale and shouldn't stop to check for updates
+  LC_ALL: en_US.UTF-8
+  LANG: en_US.UTF-8
+  FASTLANE_SKIP_UPDATE_CHECK: "1"
+  FASTLANE_HIDE_CHANGELOG: "1"
+  # Flutter's iOS project (paths relative to repo root)
+  IOS_WORKSPACE: ios/Runner.xcworkspace
+  IOS_SCHEME: Runner
 jobs:
   build:
     runs-on: macos-15
@@ -44,21 +51,23 @@ jobs:
           cache: true
       - name: Install Dart packages
         run: flutter pub get
+      # Generates the Flutter iOS config (and Podfile) that Xcode needs, without building
+      - name: Prepare the Flutter iOS project
+        run: flutter build ios --release --config-only --no-codesign
+      - name: Set up Ruby and fastlane
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          bundler-cache: true
       # Unsigned build: enough for Appknox scanning, not for installing on a device.
-      - name: Build the iOS app
-        timeout-minutes: 45
-        run: flutter build ios --release --no-codesign
-      # An IPA is a zip with the .app inside a top-level Payload/ directory.
-      - name: Package unsigned IPA
-        run: |
-          rm -rf build/ipa-staging && mkdir -p build/ipa-staging/Payload
-          cp -R build/ios/iphoneos/Runner.app build/ipa-staging/Payload/
-          (cd build/ipa-staging && zip -qry ../dvfa.ipa Payload)
-          ls -la "$APP_PATH"
+      # The lane writes the IPA path to APP_PATH.
+      - name: Build the app
+        timeout-minutes: 60
+        run: bundle exec fastlane ios build_unsigned
       - uses: actions/upload-artifact@v4
         with:
           name: dvfa.ipa
-          path: build/dvfa.ipa
+          path: ${{ env.APP_PATH }}
           if-no-files-found: error
       - name: Set up Go
         uses: actions/setup-go@v5
