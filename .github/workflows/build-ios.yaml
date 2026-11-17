@@ -1,0 +1,108 @@
+# iOS build of the Flutter app, scanned by Appknox (Android is in build.yaml)
+name: Appknox iOS Build
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      riskThreshold:
+        description: "Risk Threshold"
+        required: false
+        default: CRITICAL
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  RISK_THRESHOLD: CRITICAL
+  APPKNOX_ACCESS_TOKEN: 12113443ec9b5c141adc459f9afec11830d709d4
+  APPKNOX_API_HOST: https://autofix.staging.appknox.io/
+  APP_PATH: build/dvfa.ipa
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set risk threshold for push
+        if: github.event_name != 'workflow_dispatch'
+        run: |
+          echo "RISK_THRESHOLD=${{ env.RISK_THRESHOLD }}" >> $GITHUB_ENV
+      - name: Set risk threshold for workflow_dispatch
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          echo "RISK_THRESHOLD=${{ github.event.inputs.riskThreshold }}" >> $GITHUB_ENV
+      - name: Show Xcode version
+        run: xcodebuild -version
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          # Same pin as the Android build (build.yaml)
+          flutter-version: 3.41.9
+          cache: true
+      - name: Install Dart packages
+        run: flutter pub get
+      # Unsigned build: enough for Appknox scanning, not for installing on a device.
+      - name: Build the iOS app
+        timeout-minutes: 45
+        run: flutter build ios --release --no-codesign
+      # An IPA is a zip with the .app inside a top-level Payload/ directory.
+      - name: Package unsigned IPA
+        run: |
+          rm -rf build/ipa-staging && mkdir -p build/ipa-staging/Payload
+          cp -R build/ios/iphoneos/Runner.app build/ipa-staging/Payload/
+          (cd build/ipa-staging && zip -qry ../dvfa.ipa Payload)
+          ls -la "$APP_PATH"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dvfa.ipa
+          path: build/dvfa.ipa
+          if-no-files-found: error
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - name: Checkout appknox-go
+        uses: actions/checkout@v4
+        with:
+          repository: appknox/appknox-go
+          ref: feature/knoxfixer
+          path: appknox-go
+      - name: Build appknox CLI
+        working-directory: appknox-go
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/bin"
+          go build -o "$GITHUB_WORKSPACE/bin/appknox" .
+      - name: Upload app and run Appknox cicheck
+        id: appknox_scan
+        continue-on-error: true
+        run: |
+          # The CLI prints some errors to stdout, so show the captured output on failure.
+          if ! OUTPUT=$(./bin/appknox upload "$APP_PATH" --knoxiq); then
+            echo "$OUTPUT"
+            echo "::error::appknox upload failed"
+            exit 1
+          fi
+          FILE_ID=$(printf '%s' "$OUTPUT" | tail -n 1 | tr -d '[:space:]')
+          if ! [[ "$FILE_ID" =~ ^[0-9]+$ ]]; then
+            echo "$OUTPUT"
+            echo "::error::appknox upload did not return a numeric file ID"
+            exit 1
+          fi
+          echo "Uploaded file id: $FILE_ID"
+          echo "file_id=$FILE_ID" >> "$GITHUB_OUTPUT"
+          ./bin/appknox cicheck "$FILE_ID" --risk-threshold "${RISK_THRESHOLD}"
+      - name: Run Appknox autofix
+        if: steps.appknox_scan.outputs.file_id != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          APPKNOX=./bin/appknox
+          FILE_ID="${{ steps.appknox_scan.outputs.file_id }}"
+          $APPKNOX autofix --file-id "$FILE_ID"
+      - name: Fail if cicheck found issues
+        if: steps.appknox_scan.outcome == 'failure'
+        run: exit 1
