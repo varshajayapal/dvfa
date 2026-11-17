@@ -1,1 +1,3 @@
 #include "Generated.xcconfig"
+STRIP_INSTALLED_PRODUCT = YES
+STRIP_SWIFT_SYMBOLS = YES
